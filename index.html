@@ -466,35 +466,34 @@
       return;
     }
 
-    // Fetch HTML + inject <base href> so relative assets resolve correctly
+    // Fetch HTML, inject <base href> so relative assets resolve, load via blob URL
+    // (jsdelivr serves .html as text/plain+nosniff; blob URL forces text/html so
+    //  the browser actually executes the game instead of showing source code)
+    let blobUrl = null;
     try {
       const res = await fetch(g.url + '?t=' + Date.now());
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const html  = await res.text();
-      const base  = getBaseHref(g.url);
-      const doc   = viewerIframe.contentDocument || viewerIframe.contentWindow.document;
-      doc.open();
-      doc.write(injectBase(html, base));
-      doc.close();
-      viewerLoading.style.display = 'none';
+      const html = await res.text();
+      const base = getBaseHref(g.url);
+      blobUrl = URL.createObjectURL(new Blob([injectBase(html, base)], { type: 'text/html' }));
     } catch {
-      // Fallback: direct src (may show source, but at least something)
+      // Fallback: set src directly (will show source, but better than nothing)
+      viewerIframe.onload = () => { viewerLoading.style.display = 'none'; };
       viewerIframe.src = g.url;
+      return;
     }
-  }
 
-  viewerIframe.addEventListener('load', () => {
-    if (viewerIframe.src && viewerIframe.src !== 'about:blank') {
+    viewerIframe.onload = () => {
       viewerLoading.style.display = 'none';
-    }
-  });
+      URL.revokeObjectURL(blobUrl);
+    };
+    viewerIframe.src = blobUrl;
+  }
 
   function closeGame() {
     viewer.classList.remove('open');
     activeGame = null;
-    // Blank out via srcdoc to kill audio/loops immediately
-    viewerIframe.srcdoc = '';
-    viewerIframe.removeAttribute('srcdoc');
+    viewerIframe.onload = null;
     viewerIframe.src = 'about:blank';
     document.body.style.overflow = '';
     try {
