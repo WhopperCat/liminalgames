@@ -307,6 +307,8 @@
   let renderCursor = 0;
   const PAGE_SIZE  = 80;
   let activeGame   = null;
+  let launchCtrl   = null;  // AbortController for current fetch
+  let spinnerTimer = null;
 
   /* ── HELPERS ── */
   function esc(s) {
@@ -436,7 +438,16 @@
   });
 
   /* ── GAME LAUNCHER ── */
+  function hideSpinner() {
+    clearTimeout(spinnerTimer);
+    viewerLoading.style.display = 'none';
+  }
+
   async function launchGame(g) {
+    // Cancel any in-flight fetch from a previous launch
+    if (launchCtrl) { launchCtrl.abort(); launchCtrl = null; }
+    clearTimeout(spinnerTimer);
+
     activeGame = g;
     viewerTitle.textContent = g.name;
     viewerSource.textContent = SOURCE_LABEL[g.source] || g.source;
@@ -444,53 +455,62 @@
     viewer.classList.add('open');
     document.body.style.overflow = 'hidden';
 
-    // URL state
     try {
       const u = new URL(location.href);
       u.searchParams.set('game', g.id);
       history.pushState({ gameId: g.id }, '', u);
     } catch {}
 
-    // Track play in Supabase (fire and forget)
     sb.rpc('increment_play', { gid: g.id }).catch(() => {});
-    // Update local cache so re-sorting doesn't wait on network
     if (playCounts) playCounts.set(g.id, (playCounts.get(g.id) || 0) + 1);
-
-    // Save to recently played
     pushRecent(g);
 
-    // Non-jsdelivr URLs (external) → new tab, close viewer
     if (!isJsdelivr(g.url)) {
       window.open(g.url, '_blank', 'noopener');
       closeGame();
       return;
     }
 
-    // Fetch HTML, inject <base href> so relative assets resolve, load via blob URL
-    // (jsdelivr serves .html as text/plain+nosniff; blob URL forces text/html so
-    //  the browser actually executes the game instead of showing source code)
+    const ctrl = new AbortController();
+    launchCtrl = ctrl;
+
+    // Fetch HTML, inject <base href> so relative assets resolve, load via blob URL.
+    // jsdelivr serves .html as text/plain+nosniff; blob URL forces text/html so the
+    // browser executes the game instead of showing source code.
     let blobUrl = null;
     try {
-      const res = await fetch(g.url + '?t=' + Date.now());
+      const res = await fetch(g.url, { signal: ctrl.signal });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const html = await res.text();
+      if (ctrl.signal.aborted) return;
       const base = getBaseHref(g.url);
       blobUrl = URL.createObjectURL(new Blob([injectBase(html, base)], { type: 'text/html' }));
-    } catch {
-      // Fallback: set src directly (will show source, but better than nothing)
-      viewerIframe.onload = () => { viewerLoading.style.display = 'none'; };
+    } catch (e) {
+      if (e.name === 'AbortError') return;
+      // Fetch failed — fall back to direct iframe src and hide spinner immediately
+      viewerIframe.onload = null;
       viewerIframe.src = g.url;
+      hideSpinner();
       return;
     }
 
+    if (ctrl !== launchCtrl) { URL.revokeObjectURL(blobUrl); return; }
+    launchCtrl = null;
+
+    // Safety net: if onload never fires (e.g. CSP blocks blob), clear spinner after 20s
+    spinnerTimer = setTimeout(hideSpinner, 20000);
+
     viewerIframe.onload = () => {
-      viewerLoading.style.display = 'none';
+      hideSpinner();
       URL.revokeObjectURL(blobUrl);
+      viewerIframe.onload = null;
     };
     viewerIframe.src = blobUrl;
   }
 
   function closeGame() {
+    clearTimeout(spinnerTimer);
+    if (launchCtrl) { launchCtrl.abort(); launchCtrl = null; }
     viewer.classList.remove('open');
     activeGame = null;
     viewerIframe.onload = null;
